@@ -353,4 +353,6 @@ export interface CreateConfigValues {
   maxTurnsPerRun: number;
   heartbeatEnabled: boolean;
   intervalSec: number;
+  cloudProviderPresetId?: string;
+  customBaseUrl?: string;
 }

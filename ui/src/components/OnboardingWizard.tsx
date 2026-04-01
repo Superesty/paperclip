@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef, useCallback, useMemo } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import type { AdapterEnvironmentTestResult } from "@paperclipai/shared";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import type { AdapterEnvironmentTestResult, CompanySecret, EnvBinding } from "@paperclipai/shared";
 import { useLocation, useNavigate, useParams } from "@/lib/router";
 import { useDialog } from "../context/DialogContext";
 import { useCompany } from "../context/CompanyContext";
@@ -9,6 +9,7 @@ import { goalsApi } from "../api/goals";
 import { agentsApi } from "../api/agents";
 import { issuesApi } from "../api/issues";
 import { projectsApi } from "../api/projects";
+import { secretsApi } from "../api/secrets";
 import { queryKeys } from "../lib/queryKeys";
 import { Dialog, DialogPortal } from "@/components/ui/dialog";
 import {
@@ -23,6 +24,7 @@ import {
   extractProviderIdWithFallback
 } from "../lib/model-utils";
 import { getUIAdapter } from "../adapters";
+import { ProviderSettingsFields } from "../adapters/claude-local/provider-settings-fields";
 import { defaultCreateValues } from "./agent-config-defaults";
 import { parseOnboardingGoalInput } from "../lib/onboarding-goal";
 import {
@@ -76,6 +78,23 @@ const DEFAULT_TASK_DESCRIPTION = `You are the CEO. You set the direction for the
 - write a hiring plan
 - break the roadmap into concrete tasks and start delegating work`;
 
+const MODELS_BY_PROVIDER: Record<string, Array<{ id: string; label: string }>> = {
+  minimax: [
+    { id: "minimax2.7", label: "MiniMax 2.7" },
+  ],
+  z: [
+    { id: "glm-4.5-air", label: "GLM-4.5-Air" },
+    { id: "glm-4.7", label: "GLM-4.7" },
+    { id: "glm-5", label: "GLM-5" },
+    { id: "glm-5.1", label: "GLM-5.1" },
+  ],
+  openrouter: [
+    { id: "openrouter/google/gemini-2.0-flash-exp", label: "Gemini 2.0 Flash (OpenRouter)" },
+    { id: "openrouter/anthropic/claude-3.5-sonnet", label: "Claude 3.5 Sonnet (OpenRouter)" },
+    { id: "openrouter/openai/gpt-4o", label: "GPT-4o (OpenRouter)" },
+  ],
+};
+
 export function OnboardingWizard() {
   const { onboardingOpen, onboardingOptions, closeOnboarding } = useDialog();
   const { companies, setSelectedCompanyId, loading: companiesLoading } = useCompany();
@@ -127,6 +146,9 @@ export function OnboardingWizard() {
     useState(false);
   const [unsetAnthropicLoading, setUnsetAnthropicLoading] = useState(false);
   const [showMoreAdapters, setShowMoreAdapters] = useState(false);
+  const [cloudProviderPresetId, setCloudProviderPresetId] = useState<string>("");
+  const [customBaseUrl, setCustomBaseUrl] = useState<string>("");
+  const [envBindings, setEnvBindings] = useState<Record<string, EnvBinding>>({});
 
   // Step 3
   const [taskTitle, setTaskTitle] = useState(
@@ -158,6 +180,23 @@ export function OnboardingWizard() {
   const [createdAgentId, setCreatedAgentId] = useState<string | null>(null);
   const [createdProjectId, setCreatedProjectId] = useState<string | null>(null);
   const [createdIssueRef, setCreatedIssueRef] = useState<string | null>(null);
+
+  // Secrets for provider settings
+  const { data: availableSecrets = [] } = useQuery({
+    queryKey: createdCompanyId ? queryKeys.secrets.list(createdCompanyId) : ["secrets", "none"],
+    queryFn: () => secretsApi.list(createdCompanyId!),
+    enabled: Boolean(createdCompanyId),
+  });
+
+  const createSecret = useMutation({
+    mutationFn: (input: { name: string; value: string }) =>
+      secretsApi.create(createdCompanyId!, input),
+    onSuccess: () => {
+      if (createdCompanyId) {
+        queryClient.invalidateQueries({ queryKey: queryKeys.secrets.list(createdCompanyId) });
+      }
+    },
+  });
 
   useEffect(() => {
     setRouteDismissed(false);
@@ -193,6 +232,13 @@ export function OnboardingWizard() {
   useEffect(() => {
     if (step === 3) autoResizeTextarea();
   }, [step, taskDescription, autoResizeTextarea]);
+
+  // Reset provider fields when adapter type changes
+  useEffect(() => {
+    setCloudProviderPresetId("");
+    setCustomBaseUrl("");
+    setEnvBindings({});
+  }, [adapterType]);
 
   const {
     data: adapterModels,
@@ -248,7 +294,11 @@ export function OnboardingWizard() {
     hasAnthropicApiKeyOverrideCheck;
   const filteredModels = useMemo(() => {
     const query = modelSearch.trim().toLowerCase();
-    return (adapterModels ?? []).filter((entry) => {
+    // When a provider preset is selected AND adapter type is claude_local, use provider-specific models instead of API models
+    const sourceModels = adapterType === "claude_local" && cloudProviderPresetId && MODELS_BY_PROVIDER[cloudProviderPresetId]
+      ? MODELS_BY_PROVIDER[cloudProviderPresetId]
+      : (adapterModels ?? []);
+    return sourceModels.filter((entry) => {
       if (!query) return true;
       const provider = extractProviderIdWithFallback(entry.id, "");
       return (
@@ -257,7 +307,7 @@ export function OnboardingWizard() {
         provider.toLowerCase().includes(query)
       );
     });
-  }, [adapterModels, modelSearch]);
+  }, [adapterModels, modelSearch, cloudProviderPresetId]);
   const groupedModels = useMemo(() => {
     if (adapterType !== "opencode_local") {
       return [
@@ -335,7 +385,10 @@ export function OnboardingWizard() {
       dangerouslyBypassSandbox:
         adapterType === "codex_local"
           ? DEFAULT_CODEX_LOCAL_BYPASS_APPROVALS_AND_SANDBOX
-          : defaultCreateValues.dangerouslyBypassSandbox
+          : defaultCreateValues.dangerouslyBypassSandbox,
+      cloudProviderPresetId,
+      customBaseUrl,
+      envBindings,
     });
     if (adapterType === "claude_local" && forceUnsetAnthropicApiKey) {
       const env =
@@ -1016,6 +1069,31 @@ export function OnboardingWizard() {
                         </Popover>
                       </div>
                     </div>
+                  )}
+
+                  {adapterType === "claude_local" && (
+                    <ProviderSettingsFields
+                      values={{ ...defaultCreateValues, adapterType, cloudProviderPresetId, customBaseUrl, envBindings }}
+                      set={(patch) => {
+                        if ("cloudProviderPresetId" in patch) {
+                          const newProvider = patch.cloudProviderPresetId as string;
+                          setCloudProviderPresetId(newProvider);
+                          // Reset model when provider changes
+                          if (newProvider !== cloudProviderPresetId) {
+                            setModel("");
+                          }
+                        }
+                        if ("customBaseUrl" in patch) setCustomBaseUrl(patch.customBaseUrl as string);
+                        if ("envBindings" in patch) setEnvBindings(patch.envBindings as Record<string, EnvBinding>);
+                      }}
+                      envBindingsValue={envBindings}
+                      onEnvBindingsChange={(env) => setEnvBindings(env ?? {})}
+                      availableSecrets={availableSecrets}
+                      onCreateSecret={async (name, value) => {
+                        const created = await createSecret.mutateAsync({ name, value });
+                        return created;
+                      }}
+                    />
                   )}
 
                   {isLocalAdapter && (

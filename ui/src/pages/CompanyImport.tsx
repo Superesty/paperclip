@@ -6,6 +6,8 @@ import type {
   CompanyPortabilityPreviewResult,
   CompanyPortabilitySource,
   CompanyPortabilityAdapterOverride,
+  CompanySecret,
+  EnvBinding,
 } from "@paperclipai/shared";
 import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
@@ -13,6 +15,7 @@ import { useToast } from "../context/ToastContext";
 import { authApi } from "../api/auth";
 import { companiesApi } from "../api/companies";
 import { agentsApi } from "../api/agents";
+import { secretsApi } from "../api/secrets";
 import { queryKeys } from "../lib/queryKeys";
 import { getAgentOrderStorageKey, writeAgentOrder } from "../lib/agent-order";
 import { getProjectOrderStorageKey, writeProjectOrder } from "../lib/project-order";
@@ -33,6 +36,7 @@ import {
 import { Field, adapterLabels } from "../components/agent-config-primitives";
 import { defaultCreateValues } from "../components/agent-config-defaults";
 import { getUIAdapter, listUIAdapters } from "../adapters";
+import { ProviderSettingsFields } from "../adapters/claude-local/provider-settings-fields";
 import type { CreateConfigValues } from "@paperclipai/adapter-utils";
 import {
   type FileTreeNode,
@@ -533,6 +537,8 @@ function AdapterPickerList({
   onChangeAdapter,
   onToggleExpand,
   onChangeConfig,
+  availableSecrets,
+  createSecret,
 }: {
   agents: AdapterPickerItem[];
   adapterOverrides: Record<string, string>;
@@ -541,6 +547,8 @@ function AdapterPickerList({
   onChangeAdapter: (slug: string, adapterType: string) => void;
   onToggleExpand: (slug: string) => void;
   onChangeConfig: (slug: string, patch: Partial<CreateConfigValues>) => void;
+  availableSecrets: CompanySecret[];
+  createSecret: { mutateAsync: (input: { name: string; value: string }) => Promise<CompanySecret> };
 }) {
   if (agents.length === 0) return null;
 
@@ -609,6 +617,19 @@ function AdapterPickerList({
                       hideInstructionsFile
                       sectionLayout="cards"
                     />
+                    {selectedType === "claude_local" && (
+                      <ProviderSettingsFields
+                        values={vals}
+                        set={(patch) => onChangeConfig(agent.slug, patch)}
+                        envBindingsValue={(vals.envBindings ?? {}) as Record<string, EnvBinding>}
+                        onEnvBindingsChange={(env) => onChangeConfig(agent.slug, { envBindings: env ?? {} })}
+                        availableSecrets={availableSecrets}
+                        onCreateSecret={async (name, value) => {
+                          const created = await createSecret.mutateAsync({ name, value });
+                          return created;
+                        }}
+                      />
+                    )}
                   </div>
                 )}
               </div>
@@ -689,6 +710,24 @@ export function CompanyImport() {
   const [adapterOverrides, setAdapterOverrides] = useState<Record<string, string>>({});
   const [adapterExpandedSlugs, setAdapterExpandedSlugs] = useState<Set<string>>(new Set());
   const [adapterConfigValues, setAdapterConfigValues] = useState<Record<string, CreateConfigValues>>({});
+
+  // Secrets for provider settings
+  const { data: availableSecrets = [] } = useQuery({
+    queryKey: selectedCompanyId ? queryKeys.secrets.list(selectedCompanyId) : ["secrets", "none"],
+    queryFn: () => secretsApi.list(selectedCompanyId!),
+    enabled: Boolean(selectedCompanyId),
+  });
+
+  const createSecret = useMutation({
+    mutationFn: (input: { name: string; value: string }) => {
+      if (!selectedCompanyId) throw new Error("Select a company to create secrets");
+      return secretsApi.create(selectedCompanyId, input);
+    },
+    onSuccess: () => {
+      if (!selectedCompanyId) return;
+      queryClient.invalidateQueries({ queryKey: queryKeys.secrets.list(selectedCompanyId) });
+    },
+  });
 
   // Fetch current company agents to find CEO adapter type
   const { data: companyAgents } = useQuery({
@@ -1283,6 +1322,8 @@ export function CompanyImport() {
             onChangeAdapter={handleAdapterChange}
             onToggleExpand={handleAdapterToggleExpand}
             onChangeConfig={handleAdapterConfigChange}
+            availableSecrets={availableSecrets}
+            createSecret={createSecret}
           />
 
           {/* Import button — below renames */}
